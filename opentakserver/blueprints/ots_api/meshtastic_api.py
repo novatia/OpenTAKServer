@@ -41,27 +41,23 @@ def create_channel():
     # Make the protobuf from settings in order to make the URL
     else:
         try:
-            # channel_set.lora_config.use_preset = 'modem_preset' in request.json.keys()
-            channel_set.lora_config.modem_preset = (
-                bleach.clean(request.json.get("modem_preset"))
-                if request.json.get("modem_preset")
-                else None
-            )
-            channel_set.lora_config.region = (
-                bleach.clean(request.json.get("lora_region"))
-                if request.json.get("lora_region")
-                else None
-            )
-            channel_set.lora_config.hop_limit = (
-                request.json.get("lora_hop_limit") if request.json.get("lora_hop_limit") else None
-            )
-            channel_set.lora_config.tx_enabled = request.json.get("lora_tx_enabled")
-            channel_set.lora_config.tx_power = (
-                request.json.get("lora_tx_power") if request.json.get("lora_tx_power") else None
-            )
-            channel_set.lora_config.sx126x_rx_boosted_gain = request.json.get(
-                "lora_sx126x_rx_boosted_gain"
-            )
+            # Protobuf scalar/enum fields reject None outright (raises e.g.
+            # "'NoneType' object cannot be interpreted as an integer"), so an
+            # omitted optional field must be left unset, never assigned None.
+            if request.json.get("modem_preset"):
+                channel_set.lora_config.modem_preset = bleach.clean(request.json.get("modem_preset"))
+            if request.json.get("lora_region"):
+                channel_set.lora_config.region = bleach.clean(request.json.get("lora_region"))
+            if request.json.get("lora_hop_limit"):
+                channel_set.lora_config.hop_limit = request.json.get("lora_hop_limit")
+            if request.json.get("lora_tx_enabled") is not None:
+                channel_set.lora_config.tx_enabled = request.json.get("lora_tx_enabled")
+            if request.json.get("lora_tx_power"):
+                channel_set.lora_config.tx_power = request.json.get("lora_tx_power")
+            if request.json.get("lora_sx126x_rx_boosted_gain") is not None:
+                channel_set.lora_config.sx126x_rx_boosted_gain = request.json.get(
+                    "lora_sx126x_rx_boosted_gain"
+                )
             channel_set.lora_config.use_preset = True
 
             if "psk" in request.json.keys() and request.json.get("psk"):
@@ -71,16 +67,16 @@ def create_channel():
             else:
                 # Zero bytes indicates no encryption
                 channel_settings.psk = bytes(0)
-            channel_settings.name = (
-                bleach.clean(request.json.get("name")) if request.json.get("name") else None
-            )
-            channel_settings.uplink_enabled = request.json.get("uplink_enabled")
-            channel_settings.downlink_enabled = request.json.get("downlink_enabled")
-            channel_settings.module_settings.position_precision = (
-                request.json.get("position_precision")
-                if request.json.get("position_precision")
-                else None
-            )
+            if request.json.get("name"):
+                channel_settings.name = bleach.clean(request.json.get("name"))
+            if request.json.get("uplink_enabled") is not None:
+                channel_settings.uplink_enabled = request.json.get("uplink_enabled")
+            if request.json.get("downlink_enabled") is not None:
+                channel_settings.downlink_enabled = request.json.get("downlink_enabled")
+            if request.json.get("position_precision"):
+                channel_settings.module_settings.position_precision = request.json.get(
+                    "position_precision"
+                )
 
             channel_set.settings.append(channel_settings)
 
