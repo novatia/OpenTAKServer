@@ -12,7 +12,7 @@ import traceback
 import uuid
 from logging.handlers import TimedRotatingFileHandler
 from socket import socket, SHUT_RDWR
-from threading import Thread
+from threading import Lock, Thread
 from xml.etree.ElementTree import Element, SubElement, tostring, fromstring, ParseError
 
 import bleach
@@ -92,6 +92,8 @@ class EudHandler(socketserver.BaseRequestHandler):
         self.cached_messages = []
         self.bound_queues = []
         self.group_memberships = []
+        self._closed = False
+        self._close_lock = Lock()
         super().__init__(request, client_address, server)
         self.logger = logging.getLogger()
         self.socket: socket = request
@@ -192,36 +194,69 @@ class EudHandler(socketserver.BaseRequestHandler):
         print("finish")
 
     def close_connection(self):
+        # Can be called from setup() (failed handshake), handle_auth(), on_message() (ioloop
+        # thread) and at the end of handle(), so it has to be idempotent and must never stop
+        # half way: an exception here used to leave the socket and the RabbitMQ connection open.
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+
         self.logger.info("{} disconnected".format(self.client_address[0]))
+        self.shutdown = True
 
-        self.rabbit_channel.basic_publish(
-            exchange="cot_parser",
-            body=json.dumps(
-                {
-                    "uid": self.uid,
-                    "cot": None,
-                    "disconnected": True,
-                    "user_id": self.user.id if self.user else None,
-                }
-            ),
-            routing_key="cot_parser",
-            properties=pika.BasicProperties(expiration=self.app.config.get("OTS_RABBITMQ_TTL")),
-        )
+        channel_open = self.rabbit_channel is not None and self.rabbit_channel.is_open
 
-        self.unbind_rabbitmq_queues()
+        if channel_open:
+            try:
+                self.rabbit_channel.basic_publish(
+                    exchange="cot_parser",
+                    body=json.dumps(
+                        {
+                            "uid": self.uid,
+                            "cot": None,
+                            "disconnected": True,
+                            "user_id": self.user.id if self.user else None,
+                        }
+                    ),
+                    routing_key="cot_parser",
+                    properties=pika.BasicProperties(
+                        expiration=self.app.config.get("OTS_RABBITMQ_TTL")
+                    ),
+                )
+            except BaseException as e:
+                self.logger.warning(f"Failed to publish disconnect for {self.uid}: {e}")
 
-        if (
-            self.rabbit_channel
-            and not self.rabbit_channel.is_closing
-            and not self.rabbit_channel.is_closed
+            try:
+                self.unbind_rabbitmq_queues()
+            except BaseException as e:
+                self.logger.warning(f"Failed to unbind queues for {self.uid}: {e}")
+
+            try:
+                # Closing the channel closes the connection (on_channel_close) which stops the ioloop (on_close)
+                self.rabbit_channel.close()
+            except BaseException as e:
+                self.logger.warning(f"Failed to close RabbitMQ channel for {self.uid}: {e}")
+        elif (
+            self.rabbit_connection
+            and not self.rabbit_connection.is_closing
+            and not self.rabbit_connection.is_closed
         ):
-            self.rabbit_channel.close()
+            # The channel never opened (i.e. failed TLS handshake): close the connection from its own
+            # ioloop thread, otherwise the connection and its non-daemon ioloop thread live forever
+            try:
+                self.rabbit_connection.ioloop.add_callback_threadsafe(self.rabbit_connection.close)
+            except BaseException as e:
+                self.logger.warning(f"Failed to close RabbitMQ connection: {e}")
 
-        if not self.shutdown:
-            self.shutdown = True
-
+        try:
             self.request.shutdown(SHUT_RDWR)
+        except OSError:
+            pass
+        try:
             self.request.close()
+        except OSError:
+            pass
 
     def create_app(self):
         app = Flask(__name__)
@@ -322,8 +357,12 @@ class EudHandler(socketserver.BaseRequestHandler):
             self.rabbit_connection.close()
 
         self.shutdown = True
-        # self.request.shutdown(socket.SHUT_RDWR)
-        # self.sock.close()
+        if not self._closed:
+            # Wake up recv() in handle() so it runs close_connection() instead of waiting for the EUD
+            try:
+                self.request.shutdown(SHUT_RDWR)
+            except OSError:
+                pass
 
     def on_close(self, connection, error):
         # Stop the ioloop using add_callback_threadsafe because ioloop.stop() isn't threadsafe
