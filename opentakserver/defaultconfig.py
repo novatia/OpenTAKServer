@@ -89,6 +89,10 @@ class DefaultConfig:
 
     OTS_COT_PARSER_PROCESSES = int(os.getenv("OTS_COT_PARSER_PROCESSES", 1))
 
+    # Close EUD connections that send nothing for this many seconds, 0 disables it. Without it a phone
+    # that disappears without closing the socket (battery, network change, NAT timeout) stays connected forever
+    OTS_EUD_IDLE_TIMEOUT = int(os.getenv("OTS_EUD_IDLE_TIMEOUT", 900))
+
     OTS_ENABLE_LDAP = False
     # LDAP users in this group will be considered OTS administrators
     OTS_LDAP_ADMIN_GROUP = "ots_admin"
