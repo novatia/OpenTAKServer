@@ -274,13 +274,24 @@ def get_aishub_data():
 
 def delete_old_data():
     with apscheduler.app.app_context():
-        timestamp = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
-            seconds=app.config.get("OTS_DELETE_OLD_DATA_SECONDS"),
-            minutes=app.config.get("OTS_DELETE_OLD_DATA_MINUTES"),
-            hours=app.config.get("OTS_DELETE_OLD_DATA_HOURS"),
-            days=app.config.get("OTS_DELETE_OLD_DATA_DAYS"),
-            weeks=app.config.get("OTS_DELETE_OLD_DATA_WEEKS"),
+        retention = datetime.timedelta(
+            seconds=app.config.get("OTS_DELETE_OLD_DATA_SECONDS") or 0,
+            minutes=app.config.get("OTS_DELETE_OLD_DATA_MINUTES") or 0,
+            hours=app.config.get("OTS_DELETE_OLD_DATA_HOURS") or 0,
+            days=app.config.get("OTS_DELETE_OLD_DATA_DAYS") or 0,
+            weeks=app.config.get("OTS_DELETE_OLD_DATA_WEEKS") or 0,
         )
+
+        # With every OTS_DELETE_OLD_DATA_* set to 0 the cutoff would be "now" and the job would delete
+        # everything. Setting them to 0 is how people try to disable it, so treat it as "keep everything".
+        if retention <= datetime.timedelta(0):
+            logger.warning(
+                "delete_old_data: the OTS_DELETE_OLD_DATA_* retention is 0, not deleting anything. "
+                "Pause the job from the Jobs page or set a retention greater than 0"
+            )
+            return
+
+        timestamp = datetime.datetime.now(datetime.timezone.utc) - retention
 
         rabbit_credentials = pika.PlainCredentials(
             app.config.get("OTS_RABBITMQ_USERNAME"), app.config.get("OTS_RABBITMQ_PASSWORD")
