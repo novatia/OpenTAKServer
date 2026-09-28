@@ -11,6 +11,7 @@ import sys
 import traceback
 import uuid
 from logging.handlers import TimedRotatingFileHandler
+import socket as socket_module
 from socket import socket, SHUT_RDWR
 from threading import Lock, Thread
 from xml.etree.ElementTree import Element, SubElement, tostring, fromstring, ParseError
@@ -104,6 +105,12 @@ class EudHandler(socketserver.BaseRequestHandler):
         while not self.shutdown:
             try:
                 data = self.request.recv(65536)
+            except TimeoutError:
+                self.logger.info(
+                    f"{self.callsign or self.client_address[0]} sent nothing for "
+                    f"{self.app.config.get('OTS_EUD_IDLE_TIMEOUT')}s, closing the connection"
+                )
+                break
             except Exception as e:
                 self.logger.debug(f"recv failed: {e}")
                 break
@@ -163,8 +170,32 @@ class EudHandler(socketserver.BaseRequestHandler):
 
         return False
 
+    def configure_socket(self):
+        # UDP requests are (data, socket) tuples, nothing to configure
+        if not isinstance(self.request, socket):
+            return
+
+        # TCP keepalive detects peers that vanished without a FIN/RST
+        try:
+            self.request.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_KEEPALIVE, 1)
+            if hasattr(socket_module, "TCP_KEEPIDLE"):
+                self.request.setsockopt(socket_module.IPPROTO_TCP, socket_module.TCP_KEEPIDLE, 60)
+                self.request.setsockopt(socket_module.IPPROTO_TCP, socket_module.TCP_KEEPINTVL, 20)
+                self.request.setsockopt(socket_module.IPPROTO_TCP, socket_module.TCP_KEEPCNT, 3)
+        except OSError as e:
+            self.logger.debug(f"Failed to enable TCP keepalive: {e}")
+
+        self.apply_idle_timeout()
+
+    def apply_idle_timeout(self):
+        # recv() raises a timeout when the EUD sends nothing for OTS_EUD_IDLE_TIMEOUT seconds and
+        # handle() closes the connection
+        idle_timeout = self.app.config.get("OTS_EUD_IDLE_TIMEOUT") or 0
+        self.request.settimeout(idle_timeout if idle_timeout > 0 else None)
+
     def setup(self):
         self.create_app()
+        self.configure_socket()
 
         # RabbitMQ
         try:
