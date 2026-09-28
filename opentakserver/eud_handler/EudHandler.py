@@ -79,15 +79,19 @@ class EudHandler(socketserver.BaseRequestHandler):
     iothread = None
     is_consuming = False
     is_authenticated = False
-    cached_messages = []
     eud = None
     callsign = None
     uid = None
-    bound_queues = []
     phone_number = None
-    group_memberships = []
 
     def __init__(self, request: socket, client_address, server):
+        # Per-connection state. These must be instance attributes: as class attributes the lists
+        # were shared by every EUD connected to this process, so one EUD disconnecting unbound the
+        # RabbitMQ queues of all the others. super().__init__() runs setup() and handle(), so they
+        # have to be initialized before calling it.
+        self.cached_messages = []
+        self.bound_queues = []
+        self.group_memberships = []
         super().__init__(request, client_address, server)
         self.logger = logging.getLogger()
         self.socket: socket = request
