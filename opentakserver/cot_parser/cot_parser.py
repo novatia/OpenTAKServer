@@ -5,6 +5,7 @@ import logging
 import os
 import platform
 import random
+import signal
 import sys
 import time
 import traceback
@@ -1372,31 +1373,93 @@ def status():
     return jsonify({"status": "ok"})
 
 
+def run_child():
+    # Runs in the forked child. Everything that holds sockets, locks or threads (the socketio
+    # message queue connection, the DB connection pool) must be created here, after the fork,
+    # not inherited from the parent. The child never returns into the parent's code.
+    exit_code = 1
+    # Don't inherit the parent's handlers, they would signal the sibling processes
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        with app.app_context():
+            db.engine.dispose(close=False)
+        sio = SocketIO(message_queue="amqp://" + app.config.get("OTS_RABBITMQ_SERVER_ADDRESS"))
+        cot_parser = CoTController(app.app_context(), logger, db, sio)
+        cot_parser.run()
+        logger.error("cot_parser stopped consuming")
+    except KeyboardInterrupt:
+        exit_code = 0
+    except BaseException as e:
+        logger.error(f"cot_parser error: {e}")
+        logger.debug(traceback.format_exc())
+    finally:
+        logging.shutdown()
+        os._exit(exit_code)
+
+
+def spawn_child():
+    pid = os.fork()
+    if pid == 0:
+        run_child()
+    child_processes.append(pid)
+    logger.info(f"Started cot_parser process {pid}")
+    return pid
+
+
 def main():
-    sio = SocketIO(message_queue="amqp://" + app.config.get("OTS_RABBITMQ_SERVER_ADDRESS"))
+    # The parent only supervises: when a child dies it is started again, so the service never ends up
+    # running without a parser. It used to exit with status 0 as soon as the first child died, which
+    # systemd (Restart=on-failure) treats as a clean stop.
+    stopping = False
 
-    processes = 0
-    while processes < app.config.get("OTS_COT_PARSER_PROCESSES"):
-        try:
-            pid = os.fork()
-            if pid == 0:
-                cot_parser = CoTController(app.app_context(), logger, db, sio)
-                cot_parser.run()
-            else:
-                child_processes.append(pid)
-        except KeyboardInterrupt:
-            pass
-        except BaseException as e:
-            logger.error(f"cot_parser error: {e}")
-            logger.debug(traceback.format_exc())
-        processes += 1
+    def stop(signum, frame):
+        nonlocal stopping
+        stopping = True
+        for child in list(child_processes):
+            try:
+                os.kill(child, signum)
+            except ProcessLookupError:
+                pass
 
-    for i, child in enumerate(child_processes):
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    for _ in range(app.config.get("OTS_COT_PARSER_PROCESSES")):
+        spawn_child()
+
+    restarts = []
+    while child_processes:
         try:
-            os.waitpid(child, 0)
-        except BaseException:
-            logger.info(f"Exiting...")
-            sys.exit()
+            pid, status = os.wait()
+        except ChildProcessError:
+            break
+        except InterruptedError:
+            continue
+
+        if pid in child_processes:
+            child_processes.remove(pid)
+
+        if stopping:
+            continue
+
+        logger.error(
+            f"cot_parser process {pid} exited with status {os.waitstatus_to_exitcode(status)}, restarting it"
+        )
+
+        # Back off if children keep dying (i.e. RabbitMQ or the database are down)
+        now = time.time()
+        restarts = [t for t in restarts if now - t < 60] + [now]
+        if len(restarts) > 5:
+            time.sleep(10)
+        else:
+            time.sleep(1)
+
+        if not stopping:
+            spawn_child()
+
+    logger.info("Exiting...")
+    sys.exit(0 if stopping else 1)
 
 
 if __name__ == "__main__":
