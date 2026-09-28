@@ -21,6 +21,7 @@ from werkzeug.utils import secure_filename
 from opentakserver.extensions import db, logger
 from opentakserver.functions import format_bytes, iso8601_string_from_datetime
 from opentakserver.models.DataPackage import DataPackage
+from opentakserver.models.EUD import EUD
 from opentakserver.models.MissionContent import MissionContent
 
 data_package_marti_api = Blueprint("data_package_marti_api", __name__)
@@ -68,13 +69,23 @@ def save_data_package_to_db(
         data_package = DataPackage()
         data_package.filename = filename
         data_package.hash = sha256_hash
-        data_package.creator_uid = request.args.get("CreatorUid")  # iTAK
-        data_package.creator_uid = request.args.get("creatorUid")  # All other TAK clients
         data_package.submission_user = current_user.id if current_user.is_authenticated else None
         data_package.submission_time = datetime.now(timezone.utc)
         data_package.mime_type = mimetype
         data_package.size = file_size
-        data_package.creator_uid = eud_uid
+
+        # creatorUid for most TAK clients, CreatorUid for iTAK. These used to be overwritten by
+        # eud_uid even when it was None, so every data package ended up without a creator.
+        creator_uid = (
+            eud_uid or request.args.get("creatorUid") or request.args.get("CreatorUid") or None
+        )
+        # creator_uid is a foreign key to euds.uid, an unknown uid would make the whole upload fail
+        if creator_uid and not db.session.execute(
+            db.session.query(EUD).filter_by(uid=creator_uid)
+        ).first():
+            logger.warning(f"Data package creator {creator_uid} is not a known EUD, not setting it")
+            creator_uid = None
+        data_package.creator_uid = creator_uid
 
         if username:
             user = app.security.datastore.find_user(username=username)
