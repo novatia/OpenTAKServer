@@ -321,6 +321,14 @@ class MeshtasticController(RabbitMQClient):
         eud.team_role = self.meshtastic_devices[from_id]["role"]
         eud.meshtastic_id = int(self.meshtastic_devices[from_id]["meshtastic_id"], 16)
         eud.meshtastic_macaddr = self.meshtastic_devices[from_id]["macaddr"]
+        # A Meshtastic tracker has no TCP session for EudHandler to mark
+        # Connected on — left unset, these two stayed permanently NULL,
+        # unlike every other EUD, and the map only renders markers for EUDs
+        # that have a last_status/last_event_time. Set them here, the same
+        # way EudHandler.py does on a real connect, refreshed on every
+        # message so the tracker doesn't look perpetually offline.
+        eud.last_event_time = datetime.datetime.now(datetime.timezone.utc)
+        eud.last_status = "Connected"
 
         with self.context:
             socketio.emit("eud", eud.to_json(), namespace="/socket.io")
@@ -656,17 +664,29 @@ class MeshtasticController(RabbitMQClient):
                     ),
                 )
 
+                # OTS_MESHTASTIC_NATIVE_GROUP_ROUTING (default True): whether
+                # the three "groups"/<OTS_MESHTASTIC_GROUP>.OUT publishes below
+                # run at all. The firehose publish above always runs regardless
+                # — plugins observe every CoT there — so a plugin doing its own
+                # channel-to-group routing (e.g. MilSim Companion's
+                # MeshChannelMap) can set this False to become the sole
+                # publisher toward TAK groups for Meshtastic traffic, instead
+                # of also getting this fixed single-group delivery.
+                native_group_routing = self.context.app.config.get(
+                    "OTS_MESHTASTIC_NATIVE_GROUP_ROUTING", True
+                )
                 if portnum == "TEXT_MESSAGE_APP":
                     try:
                         if to_id == "all":
-                            self.rabbit_channel.basic_publish(
-                                exchange="groups",
-                                routing_key=f"{self.context.app.config.get('OTS_MESHTASTIC_GROUP')}.OUT",
-                                body=message,
-                                properties=pika.BasicProperties(
-                                    expiration=self.context.app.config.get("OTS_RABBITMQ_TTL")
-                                ),
-                            )
+                            if native_group_routing:
+                                self.rabbit_channel.basic_publish(
+                                    exchange="groups",
+                                    routing_key=f"{self.context.app.config.get('OTS_MESHTASTIC_GROUP')}.OUT",
+                                    body=message,
+                                    properties=pika.BasicProperties(
+                                        expiration=self.context.app.config.get("OTS_RABBITMQ_TTL")
+                                    ),
+                                )
                         else:
                             for meshtastic_device in self.meshtastic_devices:
                                 meshtastic_device = self.meshtastic_devices[meshtastic_device]
@@ -690,7 +710,7 @@ class MeshtasticController(RabbitMQClient):
                             self.rabbit_channel.basic_publish(
                                 exchange="dms", routing_key=to, body=message
                             )
-                        else:
+                        elif native_group_routing:
                             self.rabbit_channel.basic_publish(
                                 exchange="groups",
                                 routing_key=f"{self.context.app.config.get('OTS_MESHTASTIC_GROUP')}.OUT",
@@ -706,7 +726,7 @@ class MeshtasticController(RabbitMQClient):
                             )
                         )
                         self.logger.error(traceback.format_exc())
-                else:
+                elif native_group_routing:
                     self.rabbit_channel.basic_publish(
                         exchange="groups",
                         routing_key=f"{self.context.app.config.get('OTS_MESHTASTIC_GROUP')}.OUT",
