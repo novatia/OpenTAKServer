@@ -107,15 +107,22 @@ def save_channel(channel_set: apponly_pb2.ChannelSet):
             # decrypt for a freshly created/edited channel fail with
             # "'bytes' object has no attribute 'encode'" until the next
             # restart reloaded the (correctly formatted) value from the DB.
+            #
+            # Standard b64encode, not urlsafe: decrypt() reads it back with
+            # plain base64.b64decode(), which doesn't understand the '-'/'_'
+            # urlsafe alphabet swaps in for '+'/'/' — a PSK containing either
+            # byte value round-tripped through urlsafe encoding here and
+            # standard decoding there came back corrupted ("Incorrect
+            # padding"), independently of whatever the user actually typed.
             app.config.get("OTS_MESHTASTIC_DOWNLINK_CHANNELS")[
                 channel_settings.name
-            ] = base64.urlsafe_b64encode(channel_settings.psk).decode("ascii")
+            ] = base64.b64encode(channel_settings.psk).decode("ascii")
             logger.debug("Added {} to channels".format(channel_settings.name))
 
         meshtastic_channel_settings = MeshtasticChannel()
-        meshtastic_channel_settings.psk = base64.urlsafe_b64encode(channel_settings.psk).decode(
-            "ascii"
-        )
+        # Standard alphabet to match decrypt()'s plain base64.b64decode() — see
+        # the comment above on the identical encode call for the cache entry.
+        meshtastic_channel_settings.psk = base64.b64encode(channel_settings.psk).decode("ascii")
         meshtastic_channel_settings.name = channel_settings.name
         meshtastic_channel_settings.uplink_enabled = channel_settings.uplink_enabled
         meshtastic_channel_settings.downlink_enabled = channel_settings.downlink_enabled
